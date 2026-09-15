@@ -1,6 +1,6 @@
 // мой день — офлайн-кэш
 // если обновляешь index.html, поменяй версию ниже (v1 -> v2), чтобы телефон подтянул новую
-const CACHE = 'myday-v1';
+const CACHE = 'myday-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -22,6 +22,13 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
+
+  // api.github.com и прочее чужое не кэшируем — иначе синхронизация будет
+  // получать вчерашние данные
+  const url = new URL(req.url);
+  const own = url.origin === self.location.origin;
+  const font = /(^|\.)(googleapis|gstatic)\.com$/.test(url.hostname);
+  if (!own && !font) return;
 
   // страница: сначала сеть (чтобы подхватывались обновления), офлайн — из кэша
   if (req.mode === 'navigate') {

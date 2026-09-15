@@ -521,6 +521,20 @@ textarea.fi{resize:vertical;min-height:70px}
       <button class="bdup" id="notif-test">проверить</button>
     </div>
     <div class="empty-note">приходят, пока приложение открыто или свёрнуто недавно — айфон выгружает его из памяти, и таймеры останавливаются</div>
+    <label class="fl" style="margin-top:1.5rem">синхронизация с компьютером</label>
+    <div class="empty-note" id="sync-status" style="padding-top:0"></div>
+    <div class="fg"><input class="fi" id="sync-repo" placeholder="логин/репозиторий-для-данных" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <div class="fg"><input class="fi" id="sync-token" type="password" placeholder="токен github" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+    <div class="bkp-row">
+      <button class="bdup" id="sync-save">подключить</button>
+      <button class="bdup" id="sync-now">синхронизировать</button>
+    </div>
+    <div class="bkp-row" style="margin-top:8px">
+      <button class="bdup" id="sync-pull">забрать с сервера</button>
+      <button class="bdup" id="sync-push">отправить свои</button>
+    </div>
+    <div class="empty-note">дальше всё само: при открытии и через несколько секунд после изменений. «забрать» затирает данные на этом устройстве, «отправить» — на сервере, они нужны только при первой настройке</div>
+    <div class="rr"><button class="lb" id="sync-off">отключить синхронизацию</button></div>
     <div class="ma"><button class="bsave" data-close="ov-tabs">готово</button></div>
   </div>
 </div>
@@ -679,6 +693,31 @@ function dShort(ds){const d=pd(ds);return d.getDate()+' '+MS[d.getMonth()]}
 
 const now0=new Date();
 $('hdt').textContent=DF[now0.getDay()]+', '+now0.getDate()+' '+MR[now0.getMonth()];
+
+// ── ОТМЕТКИ ВРЕМЕНИ ДЛЯ СИНХРОНИЗАЦИИ ─────────────────
+// каждый ключ помнит, когда его меняли — по этому мержим устройства
+const SYNC_SKIP=['gh_repo','gh_token','gh_last','__sync_ts','__sync_del'];
+const lsRaw={set:localStorage.setItem.bind(localStorage),del:localStorage.removeItem.bind(localStorage)};
+function tsMap(){try{return JSON.parse(localStorage.getItem('__sync_ts')||'{}')}catch(e){return{}}}
+function delMap(){try{return JSON.parse(localStorage.getItem('__sync_del')||'{}')}catch(e){return{}}}
+function touchKey(k){
+  const t=tsMap(); t[k]=Date.now(); lsRaw.set('__sync_ts',JSON.stringify(t));
+  const d=delMap(); if(d[k]){delete d[k]; lsRaw.set('__sync_del',JSON.stringify(d))}
+  if(typeof queueSync==='function')queueSync();
+}
+function tombKey(k){
+  const d=delMap(); d[k]=Date.now(); lsRaw.set('__sync_del',JSON.stringify(d));
+  const t=tsMap(); delete t[k]; lsRaw.set('__sync_ts',JSON.stringify(t));
+  if(typeof queueSync==='function')queueSync();
+}
+localStorage.setItem=function(k,v){lsRaw.set(k,v); if(SYNC_SKIP.indexOf(k)<0)touchKey(k)};
+localStorage.removeItem=function(k){lsRaw.del(k); if(SYNC_SKIP.indexOf(k)<0)tombKey(k)};
+(function(){ // первый запуск: проставить время всем уже существующим ключам
+  if(localStorage.getItem('__sync_ts'))return;
+  const t={},now=Date.now();
+  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(SYNC_SKIP.indexOf(k)<0)t[k]=now}
+  lsRaw.set('__sync_ts',JSON.stringify(t));
+})();
 
 // modal helpers
 function openOv(id){$(id).classList.add('op')}
@@ -1971,7 +2010,7 @@ function renderHabits(){
 // ── РЕЗЕРВНАЯ КОПИЯ ───────────────────────────────────
 function exportData(){
   const data={};
-  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);data[k]=localStorage.getItem(k)}
+  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(k==='gh_token')continue; data[k]=localStorage.getItem(k)}
   const payload={app:'мой день',version:2,exported:new Date().toISOString(),data};
   const blob=new Blob([JSON.stringify(payload)],{type:'application/json'});
   const url=URL.createObjectURL(blob);
@@ -2036,6 +2075,167 @@ $('notif-test').onclick=async()=>{
   }catch(ex){}
 };
 
+// ── СИНХРОНИЗАЦИЯ ЧЕРЕЗ ПРИВАТНЫЙ РЕПОЗИТОРИЙ GITHUB ───
+function ghCfg(){return{repo:(localStorage.getItem('gh_repo')||'').trim(),token:(localStorage.getItem('gh_token')||'').trim()}}
+function syncOn(){const c=ghCfg();return !!(c.repo&&c.token)}
+function b64enc(str){
+  const bytes=new TextEncoder().encode(str);
+  let bin='';const CH=0x8000;
+  for(let i=0;i<bytes.length;i+=CH)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+CH));
+  return btoa(bin);
+}
+async function ghApi(path,opts){
+  const c=ghCfg();
+  const o=opts||{};
+  const headers=Object.assign({'Accept':'application/vnd.github+json','Authorization':'Bearer '+c.token},o.headers||{});
+  return fetch('https://api.github.com'+path,Object.assign({},o,{headers,cache:'no-store'}));
+}
+async function ghRead(){
+  const c=ghCfg();
+  const list=await ghApi('/repos/'+c.repo+'/contents/');
+  if(list.status===404)return{missing:true};
+  if(list.status===401||list.status===403)throw new Error('токен не подошёл');
+  if(!list.ok)throw new Error('github '+list.status);
+  const arr=await list.json();
+  const f=Array.isArray(arr)?arr.find(x=>x.name==='data.json'):null;
+  if(!f)return{missing:true};
+  const raw=await ghApi('/repos/'+c.repo+'/contents/data.json',{headers:{'Accept':'application/vnd.github.raw'}});
+  if(!raw.ok)throw new Error('github '+raw.status);
+  const text=await raw.text();
+  let payload=null;
+  try{payload=JSON.parse(text)}catch(e){throw new Error('файл на сервере повреждён')}
+  return{sha:f.sha,payload};
+}
+async function ghWrite(payload,sha){
+  const c=ghCfg();
+  const body={message:'sync '+new Date().toISOString(),content:b64enc(JSON.stringify(payload))};
+  if(sha)body.sha=sha;
+  const r=await ghApi('/repos/'+c.repo+'/contents/data.json',{method:'PUT',body:JSON.stringify(body)});
+  if(r.status===409)throw new Error('кто-то изменил данные только что, попробуй ещё раз');
+  if(!r.ok)throw new Error('github '+r.status);
+  return r;
+}
+function collectLocal(){
+  const data={},t=tsMap();
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(SYNC_SKIP.indexOf(k)>=0)continue;
+    data[k]=localStorage.getItem(k);
+    if(!t[k])t[k]=Date.now();
+  }
+  lsRaw.set('__sync_ts',JSON.stringify(t));
+  return{app:'мой день',v:2,updated:Date.now(),data,ts:t,del:delMap()};
+}
+function mergeRemote(remote,force){
+  if(!remote||!remote.data)return false;
+  if(force){
+    const keys=[];
+    for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(SYNC_SKIP.indexOf(k)<0)keys.push(k)}
+    keys.forEach(k=>lsRaw.del(k));
+    Object.keys(remote.data).forEach(k=>lsRaw.set(k,remote.data[k]));
+    lsRaw.set('__sync_ts',JSON.stringify(remote.ts||{}));
+    lsRaw.set('__sync_del',JSON.stringify(remote.del||{}));
+    return true;
+  }
+  const t=tsMap(),d=delMap(),rts=remote.ts||{},rdel=remote.del||{};
+  let changed=false;
+  Object.keys(remote.data).forEach(k=>{
+    const rt=rts[k]||remote.updated||0;
+    if(rt>(t[k]||0)&&!((d[k]||0)>rt)){
+      lsRaw.set(k,remote.data[k]); t[k]=rt; if(d[k])delete d[k]; changed=true;
+    }
+  });
+  Object.keys(rdel).forEach(k=>{
+    if(rdel[k]>(t[k]||0)){
+      if(localStorage.getItem(k)!==null){lsRaw.del(k);changed=true}
+      delete t[k]; d[k]=Math.max(d[k]||0,rdel[k]);
+    }
+  });
+  lsRaw.set('__sync_ts',JSON.stringify(t));
+  lsRaw.set('__sync_del',JSON.stringify(d));
+  return changed;
+}
+function syncStatus(txt){const el=$('sync-status'); if(el)el.textContent=txt}
+function lastSyncLabel(){
+  const v=parseInt(localStorage.getItem('gh_last')||'0');
+  if(!v)return 'ещё не синхронизировано';
+  const d=new Date(v);
+  const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  return 'последний раз '+(fd(d)===td()?'сегодня в '+hm:dShort(fd(d))+', '+hm);
+}
+function renderSyncUI(){
+  const c=ghCfg();
+  if($('sync-repo'))$('sync-repo').value=c.repo;
+  if($('sync-token'))$('sync-token').value=c.token;
+  syncStatus(syncOn()?('включена · '+lastSyncLabel()):'выключена — данные только на этом устройстве');
+}
+function refreshAll(){
+  renderTabs();
+  renderR(); renderTasks(); renderCal(); renderHabits(); renderJournal();
+  if(typeof renderShop==='function')renderShop();
+  renderSyncUI();
+}
+let syncing=false,syncTimer=null;
+function queueSync(){
+  if(!syncOn())return;
+  if(syncTimer)clearTimeout(syncTimer);
+  syncTimer=setTimeout(()=>syncNow('merge'),6000);
+}
+async function syncNow(mode){
+  if(!syncOn()){syncStatus('сначала укажи репозиторий и токен');return}
+  if(syncing)return;
+  if(syncTimer){clearTimeout(syncTimer);syncTimer=null}
+  syncing=true; syncStatus('синхронизирую...');
+  try{
+    let sha=null,changed=false;
+    if(mode!=='push'){
+      const remote=await ghRead();
+      sha=remote.sha||null;
+      if(!remote.missing)changed=mergeRemote(remote.payload,mode==='pull');
+    } else {
+      try{const remote=await ghRead(); sha=remote.sha||null}catch(e){}
+    }
+    await ghWrite(collectLocal(),sha);
+    lsRaw.set('gh_last',String(Date.now()));
+    if(changed)refreshAll();
+    syncStatus('готово · '+lastSyncLabel());
+  }catch(e){
+    syncStatus('не вышло: '+(e&&e.message?e.message:'нет связи'));
+  }
+  syncing=false;
+}
+if($('sync-save'))$('sync-save').onclick=async()=>{
+  const repo=$('sync-repo').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\/$/,'');
+  const token=$('sync-token').value.trim();
+  if(!repo||!token){syncStatus('заполни оба поля');return}
+  if(repo.indexOf('/')<0){syncStatus('репозиторий пишется как логин/название');return}
+  lsRaw.set('gh_repo',repo); lsRaw.set('gh_token',token);
+  syncStatus('проверяю доступ...');
+  try{
+    const r=await ghApi('/repos/'+repo);
+    if(r.status===404){syncStatus('репозиторий не найден — проверь название и доступ токена');return}
+    if(r.status===401||r.status===403){syncStatus('токен не подошёл');return}
+    if(!r.ok){syncStatus('github '+r.status);return}
+    syncStatus('подключено ✓ теперь нажми «отправить свои» на устройстве, где данные уже есть');
+  }catch(e){syncStatus('нет связи с github')}
+};
+if($('sync-now'))$('sync-now').onclick=()=>syncNow('merge');
+if($('sync-push'))$('sync-push').onclick=()=>{
+  if(confirm('заменить данные на сервере тем, что есть на этом устройстве?'))syncNow('push');
+};
+if($('sync-pull'))$('sync-pull').onclick=()=>{
+  if(confirm('заменить данные на этом устройстве тем, что лежит на сервере?'))syncNow('pull');
+};
+if($('sync-off'))$('sync-off').onclick=()=>{
+  if(!confirm('отключить синхронизацию? данные останутся на месте'))return;
+  lsRaw.del('gh_repo'); lsRaw.del('gh_token');
+  renderSyncUI();
+};
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden&&syncOn())syncNow('merge');
+});
+window.addEventListener('online',()=>{if(syncOn())syncNow('merge')});
+
 // ── ОФЛАЙН (service worker) ───────────────────────────
 if('serviceWorker'in navigator&&location.protocol.indexOf('http')===0){
   window.addEventListener('load',()=>{navigator.serviceWorker.register('./sw.js').catch(()=>{})});
@@ -2049,6 +2249,8 @@ renderCal();
 renderJournal();
 renderNotifStatus();
 if(notifState()==='granted')scheduleNotifs();
+renderSyncUI();
+if(syncOn())setTimeout(()=>syncNow('merge'),1200);
 </script>
 </body>
 </html>
