@@ -701,10 +701,67 @@ $('hdt').textContent=DF[now0.getDay()]+', '+now0.getDate()+' '+MR[now0.getMonth(
 
 // ── ОТМЕТКИ ВРЕМЕНИ ДЛЯ СИНХРОНИЗАЦИИ ─────────────────
 // каждый ключ помнит, когда его меняли — по этому мержим устройства
-const SYNC_SKIP=['gh_repo','gh_token','gh_last','gh_dirty','__sync_ts','__sync_del'];
+const SYNC_SKIP=['gh_repo','gh_token','gh_last','gh_dirty','__sync_ts','__sync_del','__sync_its','__sync_itd'];
 const lsRaw={set:localStorage.setItem.bind(localStorage),del:localStorage.removeItem.bind(localStorage)};
 function tsMap(){try{return JSON.parse(localStorage.getItem('__sync_ts')||'{}')}catch(e){return{}}}
 function delMap(){try{return JSON.parse(localStorage.getItem('__sync_del')||'{}')}catch(e){return{}}}
+function itsMap(){try{return JSON.parse(localStorage.getItem('__sync_its')||'{}')}catch(e){return{}}}
+function itdMap(){try{return JSON.parse(localStorage.getItem('__sync_itd')||'{}')}catch(e){return{}}}
+
+// Разбираем значение на отдельные элементы, чтобы сливать список по одной
+// задаче/событию, а не целиком. '#id' — объект с id, '=' — простое значение
+// в массиве, ':' — поле объекта.
+function itemsOf(val){
+  if(val==null)return null;
+  let p=null; try{p=JSON.parse(val)}catch(e){return null}
+  if(Array.isArray(p)){
+    const entries={},ids=[];let ok=true;
+    p.forEach(x=>{
+      let id=null;
+      if(x&&typeof x==='object'&&!Array.isArray(x)&&x.id!==undefined)id='#'+x.id;
+      else if(typeof x==='string'||typeof x==='number')id='='+x;
+      else{ok=false;return}
+      if(entries[id]===undefined)ids.push(id);
+      entries[id]=JSON.stringify(x);
+    });
+    if(!ok)return null;
+    return{type:'array',entries,ids};
+  }
+  if(p&&typeof p==='object'){
+    const entries={},ids=[];
+    Object.keys(p).forEach(k=>{const id=':'+k;ids.push(id);entries[id]=JSON.stringify(p[k])});
+    return{type:'map',entries,ids};
+  }
+  return null;
+}
+function buildValue(type,entries,orders){
+  if(type==='map'){
+    const o={};Object.keys(entries).forEach(id=>{o[id.slice(1)]=JSON.parse(entries[id])});
+    return JSON.stringify(o);
+  }
+  const order=[];
+  (orders||[]).forEach(list=>(list||[]).forEach(id=>{if(entries[id]!==undefined&&order.indexOf(id)<0)order.push(id)}));
+  Object.keys(entries).forEach(id=>{if(order.indexOf(id)<0)order.push(id)});
+  return JSON.stringify(order.map(id=>JSON.parse(entries[id])));
+}
+function stampItems(k,prev,next){
+  const its=itsMap(),itd=itdMap();
+  const b=itemsOf(next);
+  if(!b){delete its[k];delete itd[k];lsRaw.set('__sync_its',JSON.stringify(its));lsRaw.set('__sync_itd',JSON.stringify(itd));return}
+  const a=itemsOf(prev);
+  const now=Date.now();
+  const t=its[k]||{},d=itd[k]||{};
+  const pe=a?a.entries:{},ne=b.entries;
+  Object.keys(ne).forEach(id=>{
+    if(pe[id]!==ne[id]){t[id]=now; if(d[id])delete d[id]}
+    else if(!t[id])t[id]=now;
+  });
+  Object.keys(pe).forEach(id=>{if(ne[id]===undefined){d[id]=now; if(t[id])delete t[id]}});
+  Object.keys(t).forEach(id=>{if(ne[id]===undefined&&!d[id])delete t[id]});
+  its[k]=t; itd[k]=d;
+  lsRaw.set('__sync_its',JSON.stringify(its));
+  lsRaw.set('__sync_itd',JSON.stringify(itd));
+}
 function touchKey(k){
   const t=tsMap(); t[k]=Date.now(); lsRaw.set('__sync_ts',JSON.stringify(t));
   lsRaw.set('gh_dirty','1');
@@ -715,15 +772,33 @@ function tombKey(k){
   const d=delMap(); d[k]=Date.now(); lsRaw.set('__sync_del',JSON.stringify(d));
   lsRaw.set('gh_dirty','1');
   const t=tsMap(); delete t[k]; lsRaw.set('__sync_ts',JSON.stringify(t));
+  const its=itsMap(),itd=itdMap(); delete its[k]; delete itd[k];
+  lsRaw.set('__sync_its',JSON.stringify(its)); lsRaw.set('__sync_itd',JSON.stringify(itd));
   if(typeof queueSync==='function')queueSync();
 }
-localStorage.setItem=function(k,v){lsRaw.set(k,v); if(SYNC_SKIP.indexOf(k)<0)touchKey(k)};
+localStorage.setItem=function(k,v){
+  if(SYNC_SKIP.indexOf(k)<0){
+    const prev=localStorage.getItem(k);
+    lsRaw.set(k,v);
+    if(prev!==v)stampItems(k,prev,v);
+    touchKey(k);
+  } else lsRaw.set(k,v);
+};
 localStorage.removeItem=function(k){lsRaw.del(k); if(SYNC_SKIP.indexOf(k)<0)tombKey(k)};
 (function(){ // первый запуск: проставить время всем уже существующим ключам
-  if(localStorage.getItem('__sync_ts'))return;
-  const t={},now=Date.now();
-  for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i); if(SYNC_SKIP.indexOf(k)<0)t[k]=now}
-  lsRaw.set('__sync_ts',JSON.stringify(t));
+  const need=!localStorage.getItem('__sync_ts'), needIts=!localStorage.getItem('__sync_its');
+  if(!need&&!needIts)return;
+  const t=need?{}:tsMap(), its=itsMap(), now=Date.now();
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i); if(SYNC_SKIP.indexOf(k)>=0)continue;
+    if(need)t[k]=now;
+    if(needIts){
+      const b=itemsOf(localStorage.getItem(k));
+      if(b){const m={};b.ids.forEach(id=>m[id]=now);its[k]=m}
+    }
+  }
+  if(need)lsRaw.set('__sync_ts',JSON.stringify(t));
+  if(needIts)lsRaw.set('__sync_its',JSON.stringify(its));
 })();
 
 // modal helpers
@@ -2139,7 +2214,29 @@ function collectLocal(){
     if(!t[k])t[k]=Date.now();
   }
   lsRaw.set('__sync_ts',JSON.stringify(t));
-  return{app:'мой день',v:2,updated:Date.now(),data,ts:t,del:delMap()};
+  return{app:'мой день',v:3,updated:Date.now(),data,ts:t,del:delMap(),its:itsMap(),itd:itdMap()};
+}
+// Слияние одного ключа по элементам: задача, добавленная на телефоне, и
+// задача, добавленная на компе, обе остаются на месте.
+function mergeOneKey(lv,rv,lT,rT,lD,rD,lKeyTs,rKeyTs){
+  const a=itemsOf(lv),b=itemsOf(rv);
+  if(!a||!b||a.type!==b.type)return null;
+  const ids={};
+  [Object.keys(a.entries),Object.keys(b.entries),Object.keys(lD||{}),Object.keys(rD||{})]
+    .forEach(list=>list.forEach(id=>{ids[id]=1}));
+  const entries={},ts={},del={};
+  Object.keys(ids).forEach(id=>{
+    const lt=(lT&&lT[id])||(a.entries[id]!==undefined?lKeyTs:0);
+    const rt=(rT&&rT[id])||(b.entries[id]!==undefined?rKeyTs:0);
+    const ld=(lD&&lD[id])||0, rd=(rD&&rD[id])||0;
+    const edit=Math.max(lt,rt), dl=Math.max(ld,rd);
+    if(dl>edit){if(dl)del[id]=dl;return}
+    if(!edit)return;
+    if(lt>=rt&&a.entries[id]!==undefined){entries[id]=a.entries[id];ts[id]=lt}
+    else if(b.entries[id]!==undefined){entries[id]=b.entries[id];ts[id]=rt}
+    else if(a.entries[id]!==undefined){entries[id]=a.entries[id];ts[id]=lt}
+  });
+  return{value:buildValue(a.type,entries,[a.ids,b.ids]),ts,del};
 }
 function mergeRemote(remote,force){
   if(!remote||!remote.data)return false;
@@ -2150,24 +2247,43 @@ function mergeRemote(remote,force){
     Object.keys(remote.data).forEach(k=>lsRaw.set(k,remote.data[k]));
     lsRaw.set('__sync_ts',JSON.stringify(remote.ts||{}));
     lsRaw.set('__sync_del',JSON.stringify(remote.del||{}));
+    lsRaw.set('__sync_its',JSON.stringify(remote.its||{}));
+    lsRaw.set('__sync_itd',JSON.stringify(remote.itd||{}));
     return true;
   }
-  const t=tsMap(),d=delMap(),rts=remote.ts||{},rdel=remote.del||{};
+  const t=tsMap(),d=delMap(),its=itsMap(),itd=itdMap();
+  const rts=remote.ts||{},rdel=remote.del||{},rits=remote.its||{},ritd=remote.itd||{};
   let changed=false;
   Object.keys(remote.data).forEach(k=>{
-    const rt=rts[k]||remote.updated||0;
-    if(rt>(t[k]||0)&&!((d[k]||0)>rt)){
-      lsRaw.set(k,remote.data[k]); t[k]=rt; if(d[k])delete d[k]; changed=true;
+    const rt=rts[k]||remote.updated||0, lt=t[k]||0;
+    const lv=localStorage.getItem(k), rv=remote.data[k];
+    if(lv===rv)return;
+    if((d[k]||0)>rt)return;              // ключ целиком удалён у нас позже
+    if(lv===null){                       // у нас такого ключа нет
+      lsRaw.set(k,rv); t[k]=rt;
+      if(rits[k])its[k]=rits[k];
+      if(ritd[k])itd[k]=ritd[k];
+      changed=true; return;
+    }
+    const m=mergeOneKey(lv,rv,its[k],rits[k],itd[k],ritd[k],lt,rt);
+    if(m){
+      if(m.value!==lv){lsRaw.set(k,m.value);changed=true}
+      its[k]=m.ts; itd[k]=m.del; t[k]=Math.max(lt,rt);
+    } else if(rt>lt){                    // простое значение — по времени ключа
+      lsRaw.set(k,rv); t[k]=rt; changed=true;
     }
   });
   Object.keys(rdel).forEach(k=>{
     if(rdel[k]>(t[k]||0)){
       if(localStorage.getItem(k)!==null){lsRaw.del(k);changed=true}
-      delete t[k]; d[k]=Math.max(d[k]||0,rdel[k]);
+      delete t[k]; delete its[k]; delete itd[k];
+      d[k]=Math.max(d[k]||0,rdel[k]);
     }
   });
   lsRaw.set('__sync_ts',JSON.stringify(t));
   lsRaw.set('__sync_del',JSON.stringify(d));
+  lsRaw.set('__sync_its',JSON.stringify(its));
+  lsRaw.set('__sync_itd',JSON.stringify(itd));
   return changed;
 }
 let syncLog=[];
@@ -2209,7 +2325,7 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
-const APP_VERSION='7 — синхронизация';
+const APP_VERSION='8 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
