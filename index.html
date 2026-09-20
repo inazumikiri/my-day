@@ -535,6 +535,10 @@ textarea.fi{resize:vertical;min-height:70px}
     </div>
     <div class="empty-note">дальше всё само: при открытии и через несколько секунд после изменений. «забрать» затирает данные на этом устройстве, «отправить» — на сервере, они нужны только при первой настройке</div>
     <div class="rr"><button class="lb" id="sync-off">отключить синхронизацию</button></div>
+    <label class="fl" style="margin-top:1.5rem">версия</label>
+    <div class="empty-note" id="app-ver" style="padding-top:0"></div>
+    <button class="bdup" id="app-update">обновить приложение</button>
+    <div class="empty-note">скачает свежую версию с сервера. данные не пострадают</div>
     <div class="ma"><button class="bsave" data-close="ov-tabs">готово</button></div>
   </div>
 </div>
@@ -2168,6 +2172,7 @@ function renderSyncUI(){
   if($('sync-repo'))$('sync-repo').value=c.repo;
   if($('sync-token'))$('sync-token').value=c.token;
   syncStatus(syncOn()?('включена · '+lastSyncLabel()):'выключена — данные только на этом устройстве');
+  if($('app-ver'))$('app-ver').textContent=APP_VERSION;
 }
 function refreshAll(){
   renderTabs();
@@ -2175,11 +2180,17 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
+const APP_VERSION='5 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
   if(syncTimer)clearTimeout(syncTimer);
-  syncTimer=setTimeout(()=>syncNow('merge'),6000);
+  syncTimer=setTimeout(()=>syncNow('merge'),2500);
+}
+function flushSync(){ // отправить накопленное прямо сейчас (при сворачивании/закрытии)
+  if(!syncOn()||!syncTimer)return;
+  clearTimeout(syncTimer); syncTimer=null;
+  syncNow('merge');
 }
 async function syncNow(mode){
   if(!syncOn()){syncStatus('сначала укажи репозиторий и токен');return}
@@ -2232,9 +2243,25 @@ if($('sync-off'))$('sync-off').onclick=()=>{
   renderSyncUI();
 };
 document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden&&syncOn())syncNow('merge');
+  if(document.hidden)flushSync();
+  else if(syncOn())syncNow('merge');
 });
+window.addEventListener('pagehide',flushSync);
+window.addEventListener('blur',flushSync);
 window.addEventListener('online',()=>{if(syncOn())syncNow('merge')});
+
+if($('app-update'))$('app-update').onclick=async()=>{
+  $('app-ver').textContent='обновляю...';
+  try{
+    if(syncOn()){try{await syncNow('merge')}catch(e){}}
+    if('caches'in window){const ks=await caches.keys();await Promise.all(ks.map(k=>caches.delete(k)))}
+    if('serviceWorker'in navigator){
+      const rs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(rs.map(r=>r.unregister()));
+    }
+  }catch(e){}
+  location.reload();
+};
 
 // ── ОФЛАЙН (service worker) ───────────────────────────
 if('serviceWorker'in navigator&&location.protocol.indexOf('http')===0){
