@@ -523,6 +523,7 @@ textarea.fi{resize:vertical;min-height:70px}
     <div class="empty-note">приходят, пока приложение открыто или свёрнуто недавно — айфон выгружает его из памяти, и таймеры останавливаются</div>
     <label class="fl" style="margin-top:1.5rem">синхронизация с компьютером</label>
     <div class="empty-note" id="sync-status" style="padding-top:0"></div>
+    <div class="empty-note" id="sync-log" style="padding-top:0;font-size:11px;line-height:1.7"></div>
     <div class="fg"><input class="fi" id="sync-repo" placeholder="логин/репозиторий-для-данных" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
     <div class="fg"><input class="fi" id="sync-token" type="password" placeholder="токен github" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
     <div class="bkp-row">
@@ -700,17 +701,19 @@ $('hdt').textContent=DF[now0.getDay()]+', '+now0.getDate()+' '+MR[now0.getMonth(
 
 // ── ОТМЕТКИ ВРЕМЕНИ ДЛЯ СИНХРОНИЗАЦИИ ─────────────────
 // каждый ключ помнит, когда его меняли — по этому мержим устройства
-const SYNC_SKIP=['gh_repo','gh_token','gh_last','__sync_ts','__sync_del'];
+const SYNC_SKIP=['gh_repo','gh_token','gh_last','gh_dirty','__sync_ts','__sync_del'];
 const lsRaw={set:localStorage.setItem.bind(localStorage),del:localStorage.removeItem.bind(localStorage)};
 function tsMap(){try{return JSON.parse(localStorage.getItem('__sync_ts')||'{}')}catch(e){return{}}}
 function delMap(){try{return JSON.parse(localStorage.getItem('__sync_del')||'{}')}catch(e){return{}}}
 function touchKey(k){
   const t=tsMap(); t[k]=Date.now(); lsRaw.set('__sync_ts',JSON.stringify(t));
+  lsRaw.set('gh_dirty','1');
   const d=delMap(); if(d[k]){delete d[k]; lsRaw.set('__sync_del',JSON.stringify(d))}
   if(typeof queueSync==='function')queueSync();
 }
 function tombKey(k){
   const d=delMap(); d[k]=Date.now(); lsRaw.set('__sync_del',JSON.stringify(d));
+  lsRaw.set('gh_dirty','1');
   const t=tsMap(); delete t[k]; lsRaw.set('__sync_ts',JSON.stringify(t));
   if(typeof queueSync==='function')queueSync();
 }
@@ -2167,6 +2170,13 @@ function mergeRemote(remote,force){
   lsRaw.set('__sync_del',JSON.stringify(d));
   return changed;
 }
+let syncLog=[];
+function hm(d){d=d||new Date();return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0')}
+function logSync(txt){
+  syncLog.unshift(hm()+' · '+txt);
+  syncLog=syncLog.slice(0,6);
+  const el=$('sync-log'); if(el)el.innerHTML=syncLog.map(l=>'<div>'+esc(l)+'</div>').join('');
+}
 function syncStatus(txt){const el=$('sync-status'); if(el)el.textContent=txt}
 function lastSyncLabel(){
   const v=parseInt(localStorage.getItem('gh_last')||'0');
@@ -2187,7 +2197,9 @@ function renderSyncUI(){
   const c=ghCfg();
   if($('sync-repo'))$('sync-repo').value=c.repo;
   if($('sync-token'))$('sync-token').value=c.token;
-  syncStatus(syncOn()?('включена · '+lastSyncLabel()):'выключена — данные только на этом устройстве');
+  const dirty=localStorage.getItem('gh_dirty')==='1';
+  syncStatus(syncOn()?('включена · '+lastSyncLabel()+(dirty?' · есть неотправленные изменения':'')):'выключена — данные только на этом устройстве');
+  const lg=$('sync-log'); if(lg)lg.innerHTML=syncLog.map(l=>'<div>'+esc(l)+'</div>').join('');
   if($('app-ver'))$('app-ver').textContent=APP_VERSION;
   bindSyncFields();
 }
@@ -2197,7 +2209,7 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
-const APP_VERSION='6 — синхронизация';
+const APP_VERSION='7 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
@@ -2230,11 +2242,15 @@ async function syncNow(mode){
     }
     await ghWrite(collectLocal(),sha);
     lsRaw.set('gh_last',String(Date.now()));
+    lsRaw.del('gh_dirty');
+    logSync(mode==='pull'?('забрала с сервера '+pulledCount+' записей'):(mode==='push'?'перезаписала сервер своими':(changed?'получила новое с сервера и отправила своё':'отправила своё, нового не было')));
     if(changed)refreshAll();
     syncStatus(mode==='pull'?('забрано с сервера: '+pulledCount+' записей · '+lastSyncLabel())
       :(mode==='push'?('отправлено · '+lastSyncLabel()):('готово · '+lastSyncLabel())));
   }catch(e){
-    syncStatus('не вышло: '+(e&&e.message?e.message:'нет связи'));
+    const msg=(e&&e.message?e.message:'нет связи');
+    syncStatus('не вышло: '+msg);
+    logSync('ошибка: '+msg);
   }
   syncing=false;
 }
@@ -2271,7 +2287,10 @@ document.addEventListener('visibilitychange',()=>{
 });
 window.addEventListener('pagehide',flushSync);
 window.addEventListener('blur',flushSync);
+window.addEventListener('focus',()=>{if(syncOn())syncNow('merge')});
 window.addEventListener('online',()=>{if(syncOn())syncNow('merge')});
+// и просто раз в минуту, пока приложение открыто
+setInterval(()=>{if(syncOn()&&!document.hidden)syncNow('merge')},60000);
 
 if($('app-update'))$('app-update').onclick=async()=>{
   $('app-ver').textContent='обновляю...';
