@@ -2236,7 +2236,13 @@ function mergeOneKey(lv,rv,lT,rT,lD,rD,lKeyTs,rKeyTs){
     else if(b.entries[id]!==undefined){entries[id]=b.entries[id];ts[id]=rt}
     else if(a.entries[id]!==undefined){entries[id]=a.entries[id];ts[id]=lt}
   });
-  return{value:buildValue(a.type,entries,[a.ids,b.ids]),ts,del};
+  // Порядок берём у той стороны, где ключ трогали позже — тогда оба
+  // устройства соберут список одинаково, и он перестанет прыгать.
+  let orders;
+  if(rKeyTs>lKeyTs)orders=[b.ids,a.ids];
+  else if(lKeyTs>rKeyTs)orders=[a.ids,b.ids];
+  else orders=(JSON.stringify(a.ids)<=JSON.stringify(b.ids))?[a.ids,b.ids]:[b.ids,a.ids];
+  return{value:buildValue(a.type,entries,orders),ts,del};
 }
 function mergeRemote(remote,force){
   if(!remote||!remote.data)return false;
@@ -2325,7 +2331,7 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
-const APP_VERSION='8 — синхронизация';
+const APP_VERSION='9 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
