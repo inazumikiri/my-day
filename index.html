@@ -2080,6 +2080,14 @@ $('notif-test').onclick=async()=>{
 };
 
 // ── СИНХРОНИЗАЦИЯ ЧЕРЕЗ ПРИВАТНЫЙ РЕПОЗИТОРИЙ GITHUB ───
+function cleanRepo(v){return (v||'').trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'').replace(/\/$/,'')}
+function saveCfgFromFields(){ // поля сохраняются сами, без нажатия «подключить»
+  const ri=$('sync-repo'),ti=$('sync-token');
+  if(!ri||!ti)return;
+  const repo=cleanRepo(ri.value), token=(ti.value||'').trim();
+  if(repo)lsRaw.set('gh_repo',repo);
+  if(token)lsRaw.set('gh_token',token);
+}
 function ghCfg(){return{repo:(localStorage.getItem('gh_repo')||'').trim(),token:(localStorage.getItem('gh_token')||'').trim()}}
 function syncOn(){const c=ghCfg();return !!(c.repo&&c.token)}
 function b64enc(str){
@@ -2167,12 +2175,21 @@ function lastSyncLabel(){
   const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
   return 'последний раз '+(fd(d)===td()?'сегодня в '+hm:dShort(fd(d))+', '+hm);
 }
+function bindSyncFields(){
+  ['sync-repo','sync-token'].forEach(id=>{
+    const el=$(id); if(!el)return;
+    el.oninput=saveCfgFromFields;
+    el.onchange=saveCfgFromFields;
+    el.onblur=saveCfgFromFields;
+  });
+}
 function renderSyncUI(){
   const c=ghCfg();
   if($('sync-repo'))$('sync-repo').value=c.repo;
   if($('sync-token'))$('sync-token').value=c.token;
   syncStatus(syncOn()?('включена · '+lastSyncLabel()):'выключена — данные только на этом устройстве');
   if($('app-ver'))$('app-ver').textContent=APP_VERSION;
+  bindSyncFields();
 }
 function refreshAll(){
   renderTabs();
@@ -2180,7 +2197,7 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
-const APP_VERSION='5 — синхронизация';
+const APP_VERSION='6 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
@@ -2193,30 +2210,36 @@ function flushSync(){ // отправить накопленное прямо с
   syncNow('merge');
 }
 async function syncNow(mode){
-  if(!syncOn()){syncStatus('сначала укажи репозиторий и токен');return}
+  saveCfgFromFields();
+  if(!syncOn()){syncStatus('сначала заполни оба поля');return}
   if(syncing)return;
   if(syncTimer){clearTimeout(syncTimer);syncTimer=null}
   syncing=true; syncStatus('синхронизирую...');
   try{
-    let sha=null,changed=false;
+    let sha=null,changed=false,pulledCount=0;
     if(mode!=='push'){
       const remote=await ghRead();
       sha=remote.sha||null;
-      if(!remote.missing)changed=mergeRemote(remote.payload,mode==='pull');
+      if(remote.missing&&mode==='pull'){syncStatus('на сервере пока пусто — сначала нажми «отправить свои» там, где данные есть');syncing=false;return}
+      if(!remote.missing){
+        changed=mergeRemote(remote.payload,mode==='pull');
+        if(mode==='pull')pulledCount=Object.keys(remote.payload.data||{}).length;
+      }
     } else {
       try{const remote=await ghRead(); sha=remote.sha||null}catch(e){}
     }
     await ghWrite(collectLocal(),sha);
     lsRaw.set('gh_last',String(Date.now()));
     if(changed)refreshAll();
-    syncStatus('готово · '+lastSyncLabel());
+    syncStatus(mode==='pull'?('забрано с сервера: '+pulledCount+' записей · '+lastSyncLabel())
+      :(mode==='push'?('отправлено · '+lastSyncLabel()):('готово · '+lastSyncLabel())));
   }catch(e){
     syncStatus('не вышло: '+(e&&e.message?e.message:'нет связи'));
   }
   syncing=false;
 }
 if($('sync-save'))$('sync-save').onclick=async()=>{
-  const repo=$('sync-repo').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\/$/,'');
+  const repo=cleanRepo($('sync-repo').value);
   const token=$('sync-token').value.trim();
   if(!repo||!token){syncStatus('заполни оба поля');return}
   if(repo.indexOf('/')<0){syncStatus('репозиторий пишется как логин/название');return}
