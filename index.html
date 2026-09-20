@@ -2177,8 +2177,17 @@ function b64enc(str){
 async function ghApi(path,opts){
   const c=ghCfg();
   const o=opts||{};
-  const headers=Object.assign({'Accept':'application/vnd.github+json','Authorization':'Bearer '+c.token},o.headers||{});
-  return fetch('https://api.github.com'+path,Object.assign({},o,{headers,cache:'no-store'}));
+  const headers=Object.assign({
+    'Accept':'application/vnd.github+json',
+    'Authorization':'Bearer '+c.token,
+    'Cache-Control':'no-cache, no-store, must-revalidate',
+    'Pragma':'no-cache'
+  },o.headers||{});
+  // уникальный хвост у адреса: так ответ не сможет прийти из кэша браузера
+  // или старого service worker — именно из-за этого возвращались удалённые задачи
+  let url='https://api.github.com'+path;
+  if((o.method||'GET')==='GET')url+=(url.indexOf('?')>=0?'&':'?')+'_='+Date.now()+Math.random().toString(36).slice(2,6);
+  return fetch(url,Object.assign({},o,{headers,cache:'no-store'}));
 }
 async function ghRead(){
   const c=ghCfg();
@@ -2331,7 +2340,7 @@ function refreshAll(){
   if(typeof renderShop==='function')renderShop();
   renderSyncUI();
 }
-const APP_VERSION='9 — синхронизация';
+const APP_VERSION='10 — синхронизация';
 let syncing=false,syncTimer=null;
 function queueSync(){
   if(!syncOn())return;
